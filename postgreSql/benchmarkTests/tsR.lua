@@ -1,8 +1,6 @@
 -- ==========================================================
 -- Sysbench Time-Series Benchmark Script (Prepare + Run)
 -- ==========================================================
-
-
 sysbench.cmdline.options = {
   table_name  = {"Target table name", "ts_v00"},
   prefix      = {"Prefix tag value", "TS"},
@@ -11,6 +9,42 @@ sysbench.cmdline.options = {
   total_rows  = {"Total rows per thread to insert during run", 10000},
   verbose     = {"Print every batch progress", false}
 }
+
+-- ==========================================================
+-- Utility: Choose time range based on weighted probabilities
+-- ==========================================================
+local function choose_range()
+  local r = sysbench.rand.uniform(1, 100)
+  if r <= 40 then
+    return {label = "daily",   hours = 24}
+  elseif r <= 70 then
+    return {label = "weekly",  hours = 24 * 7}
+  elseif r <= 85 then
+    return {label = "monthly", hours = 24 * 30}
+  elseif r <= 95 then
+    return {label = "2months", hours = 24 * 60}
+  else
+    return {label = "3months", hours = 24 * 90}
+  end
+end
+
+-- ==========================================================
+-- Utility: Pick a random time window based on chosen range
+-- ==========================================================
+local function pick_time_window()
+  local range = choose_range()
+  local now = os.time()
+  local six_months_ago = now - (24 * 60 * 60 * 30 * 6)
+  local span = range.hours * 60 * 60
+  local start_ts = sysbench.rand.uniform(six_months_ago, now - span)
+  local end_ts = start_ts + span
+  return range.label,
+         os.date("!%Y-%m-%d %H:%M:%S", start_ts),
+         os.date("!%Y-%m-%d %H:%M:%S", end_ts)
+end
+
+
+
 
 -- ==========================================================
 -- Utility: Generate a valid UUID (Version 4)
@@ -126,25 +160,22 @@ function thread_init()
 end
 
 function event()
-  local values = {}
-  for i = 1, batch_size do
-    local guid = gen_uuid()
-    local now = os.date("!%Y-%m-%d %H:%M:%S")
-    local json_str = gen_json_payload()
-    table.insert(values, string.format(
-      "('%s','%s','%s','%s'::jsonb)", now, prefix_val, guid, json_str))
-  end
+  local label, start_time, end_time = pick_time_window()
 
-  local sql = string.format(
-    "INSERT INTO %s (time, prefix, guid, data) VALUES %s",
-    table_name, table.concat(values, ",")
-  )
+  local sql = string.format([[
+    SELECT time, data
+    FROM %s
+    WHERE prefix='%s'
+      AND time BETWEEN '%s' AND '%s'
+    ORDER BY time ASC
+  ]], table_name, prefix_val, start_time, end_time)
 
   local ok, err = pcall(function() con:query(sql) end)
+
   if not ok then
-    print(string.format("[Thread %d] ❌ Insert failed: %s", sysbench.tid, tostring(err)))
-  elseif verbose then
-    print(string.format("[Thread %d] ✅ Inserted %d rows", sysbench.tid, batch_size))
+    print(string.format("❌ [%s] Query failed: %s", label, tostring(err)))
+  elseif sysbench.opt.verbose then
+    print(string.format("✅ [%s] Range query %s → %s", label, start_time, end_time))
   end
 end
 
