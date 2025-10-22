@@ -57,17 +57,39 @@
 -- ==========================================================
 
 sysbench.cmdline.options = {
-  table_name       = {"Target table name", "ts_v00"},
-  prefix           = {"Prefix tag value", "TS"},
-  table_size       = {"Number of rows to insert during prepare", 10000},
-  batch_size       = {"Rows per batch insert during run", 100},
-  total_rows       = {"Total rows per thread to insert during run", 10000},
-  verbose          = {"Print every batch progress", false},
-  n_guids          = {"Number of GUIDs to generate or load", 1000},
-  csv_path         = {"Path to save or load the GUID CSV file", "./guid_pool.csv"},
-  use_compression  = {"Enable compression (true/false)", false},
-  compression_algo = {"Compression algorithm (lz4, pglz, zstd)", "lz4"},
+  table_name         = {"Target table name", "ts_v00"},
+  prefix             = {"Prefix tag value", "TS"},
+  table_size         = {"Number of rows to insert during prepare", 10000},
+  prepare_batch_size = {"Rows per batch during prepare phase", 100},
+  run_batch_size     = {"Rows per batch during run phase", 10},
+  batch_size         = {"Rows per batch insert during run", 100},  
+  total_rows         = {"Total rows per thread to insert during run", 10000},
+  verbose            = {"Print every batch progress", false},
+  n_guids            = {"Number of GUIDs to generate or load", 1000},
+  csv_path           = {"Path to save or load the GUID CSV file", "./guid_pool.csv"},
+  use_compression    = {"Enable compression (true/false)", false},
+  compression_algo   = {"Compression algorithm (lz4, pglz, zstd)", "lz4"},
 }
+
+
+local socket_ok, socket = pcall(require, "socket")
+
+function get_timestamp_utc()
+  if socket_ok and socket.gettime then
+    local t = socket.gettime()
+    local seconds = math.floor(t)
+    local micros = math.floor((t - seconds) * 1e6)
+    return string.format("%s.%06d", os.date("!%Y-%m-%d %H:%M:%S", seconds), micros)
+  else
+    -- fallback: use os.date() + random microsecond jitter
+    local micros = math.random(0, 999999)
+    return string.format("%s.%06d", os.date("!%Y-%m-%d %H:%M:%S"), micros)
+  end
+end
+
+
+
+
 -- ==========================================================
 -- Utility: Generate a valid UUID (Version 4)
 -- ==========================================================
@@ -156,7 +178,7 @@ local function gen_json_payload()
 
   -- Assemble JSON payload for this sensor
   local json_str = string.format(
-    '{"sensor_id":"%s","readings":[%s],"extra":"%s"}',
+    '{"sensor_id":"%s","readings":[%s],"variable_pad":"%s"}',
     sensor.id,
     table.concat(readings, ","),
     pad
@@ -174,12 +196,12 @@ function create_table(con)
 
   local create_sql = string.format([[
     CREATE TABLE IF NOT EXISTS %s (
-      time     TIMESTAMP(2) NOT NULL,
+      time     TIMESTAMP(6) NOT NULL,
       prefix   VARCHAR(4) NOT NULL,
       guid     VARCHAR(64) NOT NULL,
       data     JSONB,
-      PRIMARY KEY (time, prefix, guid)
-    );
+      PRIMARY KEY (prefix, guid, time)
+  );
   ]], table_name)
 
   -- ✅ First, create the table
@@ -320,13 +342,16 @@ end
 -- and cycles through it in random order
 -- ==========================================================
 
+-- ==========================================================
+-- Prepare Phase — Bulk Insert
+-- ==========================================================
 function prepare()
-  local csv_path   = sysbench.opt.csv_path or "guid_pool.csv"
-  local n_guids    = sysbench.opt.n_guids or 1000
-  local table_name = sysbench.opt.table_name
-  local prefix_val = sysbench.opt.prefix
-  local total_rows = sysbench.opt.table_size
-  local batch_size = sysbench.opt.batch_size
+  local csv_path     = sysbench.opt.csv_path or "guid_pool.csv"
+  local n_guids      = sysbench.opt.n_guids or 1000
+  local table_name   = sysbench.opt.table_name
+  local prefix_val   = sysbench.opt.prefix
+  local total_rows   = sysbench.opt.table_size
+  local prepare_batch = sysbench.opt.prepare_batch_size or sysbench.opt.batch_size or 100
 
   print("Connecting to PostgreSQL...")
   local con = sysbench.sql.driver():connect()
@@ -336,10 +361,13 @@ function prepare()
   guid_pool = create_guid_pool(n_guids)
   save_guid_pool_to_csv(csv_path, guid_pool)
 
-  print(string.format("=== Prepare phase started for table: %s ===", table_name))
-  print(string.format("Total rows: %d | GUIDs: %d | Batch size: %d", total_rows, #guid_pool, batch_size))
+  print(string.format(
+    "=== Prepare phase started for table: %s ===", table_name))
+  print(string.format(
+    "Total rows: %d | GUIDs: %d | Batch size: %d",
+    total_rows, #guid_pool, prepare_batch))
 
-  -- Helper to shuffle GUID list in-place (Fisher–Yates)
+  -- Helper to shuffle GUID list in-place
   local function shuffle(tbl)
     for i = #tbl, 2, -1 do
       local j = math.random(i)
@@ -358,24 +386,21 @@ function prepare()
 
     for _, guid in ipairs(guid_pool) do
       if inserted >= total_rows then break end
+      -- local ms = math.random(0, 999999)  -- adds microsecond-level randomness
+      -- local now = string.format("%s.%06d", os.date("!%Y-%m-%d %H:%M:%S"), ms)
+      -- local now = string.format("%s.%06d", os.date("!%Y-%m-%d %H:%M:%S"), math.floor((os.clock() * 1000000) % 1000000))
 
-      local now = string.format(
-        "%s.%02d",
-        os.date("!%Y-%m-%d %H:%M:%S"),
-        math.floor((os.clock() * 100) % 100)
-      )
+      local now = get_timestamp_utc()
       local json_str = gen_json_payload()
 
       table.insert(values, string.format(
-        "('%s','%s','%s','%s'::jsonb)", now, prefix_val, guid, json_str
-      ))
+        "('%s','%s','%s','%s'::jsonb)", now, prefix_val, guid, json_str))
       inserted = inserted + 1
 
-      if (#values == batch_size or inserted == total_rows) then
+      if (#values == prepare_batch or inserted == total_rows) then
         local sql = string.format(
           "INSERT INTO %s (time, prefix, guid, data) VALUES %s",
-          table_name, table.concat(values, ",")
-        )
+          table_name, table.concat(values, ","))
         local ok, err = pcall(function() con:query(sql) end)
         if not ok then
           print(string.format("❌ Batch failed at row %d: %s", inserted, tostring(err)))
@@ -384,82 +409,94 @@ function prepare()
       end
     end
 
-    print(string.format("✅ Round %d complete — total inserted so far: %d / %d", round, inserted, total_rows))
+    print(string.format("✅ Round %d complete — inserted %d / %d rows", round, inserted, total_rows))
   end
 
-  print(string.format("🎯 Prepare phase completed (%d total rows) across %d rounds.", inserted, round))
+  print(string.format("🎯 Prepare phase completed (%d rows total across %d rounds)", inserted, round))
   con:disconnect()
 end
 
 
 
+
 -- ==========================================================
--- Run Phase — Continuous Write Benchmark
+-- Thread Initialization — Run Phase Setup
 -- ==========================================================
 function thread_init()
-  math.randomseed(os.time() + sysbench.tid) -- Seed RNG per thread
+  math.randomseed(os.time() + sysbench.tid) -- unique RNG seed per thread
   drv = sysbench.sql.driver()
   con = drv:connect()
+
   table_name = sysbench.opt.table_name
   prefix_val = sysbench.opt.prefix
-  batch_size = sysbench.opt.batch_size
+  batch_size = sysbench.opt.run_batch_size or sysbench.opt.batch_size or 1
   total_rows = sysbench.opt.total_rows
-  verbose = sysbench.opt.verbose
+  verbose    = sysbench.opt.verbose
 
-  -- ✅ Load GUIDs once per thread
+  -- ✅ Load GUIDs for this thread
   guid_pool = {}
   for line in io.lines(sysbench.opt.csv_path) do
     table.insert(guid_pool, line)
   end
 
-  print(string.format("[Thread %d] Initialized (batch=%d, total=%d)",
-                      sysbench.tid, batch_size, total_rows))
+  print(string.format(
+    "[Thread %d] Initialized (run_batch=%d, total_rows=%d, GUIDs=%d)",
+    sysbench.tid, batch_size, total_rows, #guid_pool))
 end
 
+
+-- ==========================================================
+-- Run Phase — Continuous Write Benchmark
+-- ==========================================================
 function event()
+  local run_batch = sysbench.opt.run_batch_size or sysbench.opt.batch_size or 1
   local values = {}
 
-  -- 1️⃣ Shuffle the GUID pool for this batch
+  -- Fisher–Yates shuffle for realistic GUID order
   local function shuffle(tbl)
     for i = #tbl, 2, -1 do
       local j = math.random(i)
       tbl[i], tbl[j] = tbl[j], tbl[i]
     end
   end
-
   shuffle(guid_pool)
 
-  -- 2️⃣ Iterate through GUIDs up to batch_size
   local inserted_batch = 0
-  for i = 1, math.min(batch_size, #guid_pool) do
+  for i = 1, math.min(run_batch, #guid_pool) do
     local guid = guid_pool[i]
-
-    local now = string.format(
-      "%s.%02d",
-      os.date("!%Y-%m-%d %H:%M:%S"),
-      math.floor((os.clock() * 100) % 100)
-    )
-
+    -- local ms = math.random(0, 999999)  -- adds microsecond-level randomness
+    -- local now = string.format("%s.%06d", os.date("!%Y-%m-%d %H:%M:%S"), ms)
+    -- local now = string.format("%s.%06d", os.date("!%Y-%m-%d %H:%M:%S"), math.floor((os.clock() * 1000000) % 1000000))
+    
+    local now = get_timestamp_utc()
     local json_str = gen_json_payload()
 
     table.insert(values, string.format(
-      "('%s','%s','%s','%s'::jsonb)", now, prefix_val, guid, json_str
-    ))
+      "('%s','%s','%s','%s'::jsonb)", now, prefix_val, guid, json_str))
     inserted_batch = inserted_batch + 1
   end
 
-  -- 3️⃣ Combine and execute insert
+  -- Perform batch insert
   local sql = string.format(
     "INSERT INTO %s (time, prefix, guid, data) VALUES %s",
-    table_name, table.concat(values, ",")
-  )
+    table_name, table.concat(values, ","))
 
-  local ok, err = pcall(function() con:query(sql) end)
+  local ok, result = pcall(function()
+    return con:query(sql)
+  end)
+
   if not ok then
-    print(string.format("[Thread %d] ❌ Batch insert failed: %s", sysbench.tid, tostring(err)))
-  elseif verbose then
-    print(string.format("[Thread %d] ✅ Inserted %d rows for shuffled GUIDs", sysbench.tid, inserted_batch))
+    print(string.format("[Thread %d] ❌ Lua error: %s", sysbench.tid, tostring(result)))
+  -- elseif result == nil then
+  --   print(string.format("[Thread %d] ⚠️ Query returned nil", sysbench.tid))
+  elseif type(result) == "table" and result.err then
+    print(string.format("[Thread %d] ⚠️ PostgreSQL error: %s", sysbench.tid, result.err))
+  else
+    if verbose then
+      print(string.format("[Thread %d] ✅ Inserted %d rows", sysbench.tid, inserted_batch))
+    end
   end
+
 end
 
 
