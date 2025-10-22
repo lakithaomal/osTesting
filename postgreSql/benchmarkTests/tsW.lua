@@ -2,6 +2,13 @@
 -- Sysbench Time-Series Benchmark Script (Prepare + Run)
 -- ==========================================================
 
+-- CRUD operations: 40% C, 30% R, 20% U, and 10% D.
+-- Record sizes should be in the range of 4KB to 64KB 
+-- Pick guids from a list of pre-generated guids to simulate realistic access patterns.
+-- Custom size of the startup prep table.
+-- CSV Logging of detailed per-transaction latencies.
+-- The length should vary 
+-- ==========================================================
 
 sysbench.cmdline.options = {
   table_name  = {"Target table name", "ts_v00"},
@@ -22,6 +29,21 @@ local function gen_uuid()
     return string.format('%x', v)
   end)
 end
+
+-- ==========================================================
+-- Save GUID pool to CSV (one per line)
+-- ==========================================================
+local function save_guid_pool_to_csv(filename, guids)
+  local f, err = io.open(filename, "w")
+  assert(f, "❌ Cannot open " .. filename .. ": " .. tostring(err))
+  for _, g in ipairs(guids) do
+    f:write(g .. "\n")
+  end
+  f:close()
+  print(string.format("💾 Saved %d GUIDs to %s", #guids, filename))
+end
+
+
 
 -- ==========================================================
 -- Utility: Generate variable-size JSON (100B – 1KB)
@@ -65,6 +87,13 @@ end
 -- Prepare Phase — Bulk Insert
 -- ==========================================================
 function prepare()
+
+  guid_pool = create_guid_pool(n_guids)
+  save_guid_pool_to_csv("guid_pool.csv", guid_pool)
+
+  -- -- ✅ Load pre-generated GUIDs
+  -- guid_pool = load_guid_pool_from_csv("guid_pool.csv")
+
   local table_name = sysbench.opt.table_name
   local prefix_val = sysbench.opt.prefix
   local total_rows = sysbench.opt.table_size
@@ -76,12 +105,14 @@ function prepare()
 
   print(string.format("=== Prepare phase started for table: %s ===", table_name))
   print(string.format("Inserting %d rows (batch size = %d)", total_rows, batch_size))
+  print(string.format("Using %d GUIDs from pool", #guid_pool))
 
   local values = {}
   local inserted = 0
 
   for i = 1, total_rows do
-    local guid = gen_uuid()
+    -- ✅ Pick a random GUID from the loaded pool
+    local guid = guid_pool[sysbench.rand.default(1, #guid_pool)]
     local now = os.date("!%Y-%m-%d %H:%M:%S")
     local json_str = gen_json_payload()
 
@@ -89,6 +120,7 @@ function prepare()
       "('%s','%s','%s','%s'::jsonb)", now, prefix_val, guid, json_str
     ))
 
+    -- Write in batches
     if (#values == batch_size or i == total_rows) then
       local sql = string.format(
         "INSERT INTO %s (time, prefix, guid, data) VALUES %s",
@@ -126,25 +158,31 @@ function thread_init()
 end
 
 function event()
-  local values = {}
-  for i = 1, batch_size do
-    local guid = gen_uuid()
-    local now = os.date("!%Y-%m-%d %H:%M:%S")
-    local json_str = gen_json_payload()
-    table.insert(values, string.format(
-      "('%s','%s','%s','%s'::jsonb)", now, prefix_val, guid, json_str))
-  end
+  -- 1️⃣ Randomly pick a GUID from the shared pool
+  local guid = guid_pool[sysbench.rand.default(1, #guid_pool)]
 
-  local sql = string.format(
-    "INSERT INTO %s (time, prefix, guid, data) VALUES %s",
-    table_name, table.concat(values, ",")
-  )
+  -- 2️⃣ Pick a random time window (daily, weekly, etc.)
+  local label, start_time, end_time = pick_time_window()
 
+  -- 3️⃣ Build query for this device within that window
+  local sql = string.format([[
+    SELECT time, data
+    FROM %s
+    WHERE prefix='%s'
+      AND guid='%s'
+      AND time BETWEEN '%s' AND '%s'
+    ORDER BY time ASC
+  ]], table_name, prefix_val, guid, start_time, end_time)
+
+  -- 4️⃣ Execute query safely
   local ok, err = pcall(function() con:query(sql) end)
+
   if not ok then
-    print(string.format("[Thread %d] ❌ Insert failed: %s", sysbench.tid, tostring(err)))
-  elseif verbose then
-    print(string.format("[Thread %d] ✅ Inserted %d rows", sysbench.tid, batch_size))
+    print(string.format("❌ [%s] Query failed for GUID %s: %s",
+      label, guid, tostring(err)))
+  elseif sysbench.opt.verbose then
+    print(string.format("✅ [%s] Read data for GUID %s → %s → %s",
+      label, guid, start_time, end_time))
   end
 end
 
