@@ -1,49 +1,59 @@
 #!/usr/bin/env bash
 # ==========================================================
-# Sysbench PostgreSQL Time-Series Benchmark Runner (Full CSV)
+# Sysbench PostgreSQL OLTP/Time-Series Benchmark Runner (Full CSV)
 # ==========================================================
-# Runs:
+# Phases:
 #   1. prepare → creates table & inserts base data
-#   2. run     → continuous insert benchmark
-#   3. cleanup → drops table
+#   2. run     → executes workload for defined duration
+#   3. cleanup → drops table (optional)
 #
-# Logs all Sysbench metrics into results/summary.csv
-# Compatible with Sysbench 1.0.x (macOS + Linux)
+# Features:
+#   - Works with Sysbench 1.0.x on macOS/Linux
+#   - Logs metrics + all test parameters
+#   - Generates persistent summary CSV in ./results/
+#   - Includes latency, TPS, QPS, compression flags, CRUD %, GUID pool size, etc.
 # ==========================================================
 
 set -euo pipefail
 
 # ---------- CONFIGURATION ----------
-DB_HOST="IP"
-DB_PORT="5432"
-DB_USER="postgres"
-DB_PASS="PW"
-DB_NAME="benchmark_test_01"
 TABLE_NAME="ts_v01"
 PREFIX="TS"
+SCRIPT="./tsW.lua"
 
-# Benchmark behavior
-PREPARE_BATCH_SIZE=100
-RUN_BATCH_SIZE=5
+DB_HOST="IP"
+DB_PORT="5432"
+DB_USER="USER"
+DB_PASS="PW"
+DB_NAME="benchmark_test_01"
+
+# Benchmark parameters (must match Lua sysbench.cmdline.options)
+BATCH_SIZE=100
 TABLE_SIZE=1000
+TOTAL_ROWS=10
+N_GUIDS=1000
+CSV_PATH="./guids/ts.csv"
 THREADS=1
-DURATION=5
+DURATION=30
 REPORT_INTERVAL=5
 USE_COMPRESSION=false
+COMPRESSION_ALGO="lz4"
+VERBOSE=false
 HISTOGRAM=true
 
-SCRIPT="tsW.lua"
+# Directories
 LOG_DIR="./logs"
 CSV_DIR="./results"
 mkdir -p "$LOG_DIR" "$CSV_DIR"
 
 RUN_ID=$(date -u +"%Y%m%dT%H%M%S")
-LOG_FILE="${LOG_DIR}/sysbench_${RUN_ID}.log"
-CSV_FILE="${CSV_DIR}/summary.csv"
+LOG_FILE="${LOG_DIR}/sysbench_ts_${RUN_ID}.log"
+CSV_FILE="${CSV_DIR}/summary_ts.csv"
 
 # ---------- CSV HEADER ----------
 if [ ! -f "$CSV_FILE" ]; then
-  echo "run_id,date,host,db,table,prefix,threads,prepare_batch_size,run_batch_size,table_size,duration,use_compression,histogram,read_queries,write_queries,other_queries,total_queries,transactions,transactions_per_sec,queries_per_sec,ignored_errors,reconnects,total_time_s,total_events,lat_min_ms,lat_avg_ms,lat_max_ms,lat_p95_ms,lat_sum_ms" > "$CSV_FILE"
+  echo "run_id,date,host,port,db,table,prefix,threads,batch_size,table_size,total_rows,n_guids,csv_path,duration,report_interval,use_compression,compression_algo,verbose,histogram,read_queries,write_queries,other_queries,total_queries,transactions,transactions_per_sec,queries_per_sec,ignored_errors,reconnects,total_time_s,total_events,lat_min_ms,lat_avg_ms,lat_max_ms,lat_p95_ms,lat_sum_ms" \
+  > "$CSV_FILE"
 fi
 
 # ---------- FUNCTION: Run a Sysbench phase ----------
@@ -64,8 +74,13 @@ run_phase() {
           --table_name="$TABLE_NAME" \
           --prefix="$PREFIX" \
           --table-size="$TABLE_SIZE" \
-          --prepare_batch_size="$PREPARE_BATCH_SIZE" \
-          $( [[ "$USE_COMPRESSION" == true ]] && echo "--use_compression=true" ) \
+          --batch_size="$BATCH_SIZE" \
+          --total_rows="$TOTAL_ROWS" \
+          --n_guids="$N_GUIDS" \
+          --csv_path="$CSV_PATH" \
+          --use_compression="$USE_COMPRESSION" \
+          --compression_algo="$COMPRESSION_ALGO" \
+          --verbose="$VERBOSE" \
           prepare
         ;;
       run)
@@ -78,10 +93,16 @@ run_phase() {
           --pgsql-db="$DB_NAME" \
           --table_name="$TABLE_NAME" \
           --prefix="$PREFIX" \
-          --run_batch_size="$RUN_BATCH_SIZE" \
           --threads="$THREADS" \
           --time="$DURATION" \
           --report-interval="$REPORT_INTERVAL" \
+          --batch_size="$BATCH_SIZE" \
+          --total_rows="$TOTAL_ROWS" \
+          --n_guids="$N_GUIDS" \
+          --csv_path="$CSV_PATH" \
+          --use_compression="$USE_COMPRESSION" \
+          --compression_algo="$COMPRESSION_ALGO" \
+          --verbose="$VERBOSE" \
           $( [[ "$HISTOGRAM" == true ]] && echo "--histogram" ) \
           run
         ;;
@@ -128,8 +149,6 @@ qps=$(grep -E "queries:" "$LOG_FILE" | tail -1 | awk -F'[()]' '{print $2}' | awk
 ignored_errs=$(grep -E "ignored errors:" "$LOG_FILE" | tail -1 | awk '{print $3}')
 reconnects=$(grep -E "reconnects:" "$LOG_FILE" | tail -1 | awk '{print $3+0}')
 
-
-
 total_time=$(grep -E "total time:" "$LOG_FILE" | tail -1 | awk '{print $3}' | tr -d 's')
 total_events=$(grep -E "total number of events:" "$LOG_FILE" | tail -1 | awk '{print $5}')
 
@@ -148,14 +167,9 @@ for var in read_q write_q other_q total_q transactions tps qps ignored_errs reco
   fi
 done
 
-# ---------- ENSURE CSV EXISTS ----------
-mkdir -p "$(dirname "$CSV_FILE")"
-if [ ! -f "$CSV_FILE" ]; then
-  echo "run_id,date,host,db,table,prefix,threads,prepare_batch_size,run_batch_size,table_size,duration,use_compression,histogram,read_queries,write_queries,other_queries,total_queries,transactions,transactions_per_sec,queries_per_sec,ignored_errors,reconnects,total_time_s,total_events,lat_min_ms,lat_avg_ms,lat_max_ms,lat_p95_ms,lat_sum_ms" > "$CSV_FILE"
-fi
-
 # ---------- WRITE TO CSV ----------
-echo "${RUN_ID},$(date -u +'%Y-%m-%dT%H:%M:%SZ'),${DB_HOST},${DB_NAME},${TABLE_NAME},${PREFIX},${THREADS},${PREPARE_BATCH_SIZE},${RUN_BATCH_SIZE},${TABLE_SIZE},${DURATION},${USE_COMPRESSION},${HISTOGRAM},${read_q},${write_q},${other_q},${total_q},${transactions},${tps},${qps},${ignored_errs},${reconnects},${total_time},${total_events},${lat_min},${lat_avg},${lat_max},${lat_p95},${lat_sum}" >> "$CSV_FILE"
+echo "${RUN_ID},$(date -u +'%Y-%m-%dT%H:%M:%SZ'),${DB_HOST},${DB_PORT},${DB_NAME},${TABLE_NAME},${PREFIX},${THREADS},${BATCH_SIZE},${TABLE_SIZE},${TOTAL_ROWS},${N_GUIDS},${CSV_PATH},${DURATION},${REPORT_INTERVAL},${USE_COMPRESSION},${COMPRESSION_ALGO},${VERBOSE},${HISTOGRAM},${read_q},${write_q},${other_q},${total_q},${transactions},${tps},${qps},${ignored_errs},${reconnects},${total_time},${total_events},${lat_min},${lat_avg},${lat_max},${lat_p95},${lat_sum}" \
+>> "$CSV_FILE"
 
 echo
 echo "✅ Benchmark complete."

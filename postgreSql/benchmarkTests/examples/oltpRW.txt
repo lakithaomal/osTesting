@@ -1,0 +1,189 @@
+#!/usr/bin/env bash
+# ==========================================================
+# Sysbench PostgreSQL OLTP/Time-Series Benchmark Runner (Full CSV)
+# ==========================================================
+# Phases:
+#   1. prepare → creates table & inserts base data
+#   2. run     → executes workload for defined duration
+#   3. cleanup → drops table (optional)
+#
+# Features:
+#   - Works with Sysbench 1.0.x on macOS/Linux
+#   - Logs metrics + all test parameters
+#   - Generates persistent summary CSV in ./results/
+#   - Includes latency, TPS, QPS, compression flags, CRUD %, GUID pool size, etc.
+# ==========================================================
+
+set -euo pipefail
+
+# ---------- CONFIGURATION ----------
+TABLE_NAME="oltp_v01"
+PREFIX="OLTP"
+SCRIPT="./oltpRW.lua"
+
+DB_HOST="IP"
+DB_PORT="5432"
+DB_USER="USER"
+DB_PASS="PW"
+DB_NAME="benchmark_test_01"
+
+# Benchmark parameters (must match Lua sysbench.cmdline.options)
+BATCH_SIZE=100
+TABLE_SIZE=1000
+TOTAL_ROWS=10
+N_GUIDS=2000
+CSV_PATH="./guids/oltp.csv"
+THREADS=1
+DURATION=30
+REPORT_INTERVAL=5
+USE_COMPRESSION=false
+COMPRESSION_ALGO="lz4"
+VERBOSE=false
+HISTOGRAM=true
+PCT_CREATE=40
+PCT_READ=30
+PCT_UPDATE=20
+PCT_DELETE=10
+
+# Directories
+LOG_DIR="./logs"
+CSV_DIR="./results"
+mkdir -p "$LOG_DIR" "$CSV_DIR"
+
+RUN_ID=$(date -u +"%Y%m%dT%H%M%S")
+LOG_FILE="${LOG_DIR}/sysbench_oltp_${RUN_ID}.log"
+CSV_FILE="${CSV_DIR}/summary_oltp.csv"
+
+# ---------- CSV HEADER ----------
+if [ ! -f "$CSV_FILE" ]; then
+  echo "run_id,date,host,port,db,table,prefix,threads,batch_size,table_size,total_rows,n_guids,csv_path,duration,report_interval,use_compression,compression_algo,verbose,histogram,pct_create,pct_read,pct_update,pct_delete,read_queries,write_queries,other_queries,total_queries,transactions,transactions_per_sec,queries_per_sec,ignored_errors,reconnects,total_time_s,total_events,lat_min_ms,lat_avg_ms,lat_max_ms,lat_p95_ms,lat_sum_ms" \
+  > "$CSV_FILE"
+fi
+
+# ---------- FUNCTION: Run a Sysbench phase ----------
+run_phase() {
+  local phase=$1
+  echo "=== Running phase: ${phase} ==="
+  {
+    echo "=== ${phase^^} PHASE START (${RUN_ID}) ==="
+    case "$phase" in
+      prepare)
+        sysbench "$SCRIPT" \
+          --db-driver=pgsql \
+          --pgsql-host="$DB_HOST" \
+          --pgsql-port="$DB_PORT" \
+          --pgsql-user="$DB_USER" \
+          --pgsql-password="$DB_PASS" \
+          --pgsql-db="$DB_NAME" \
+          --table_name="$TABLE_NAME" \
+          --prefix="$PREFIX" \
+          --table-size="$TABLE_SIZE" \
+          --batch_size="$BATCH_SIZE" \
+          --total_rows="$TOTAL_ROWS" \
+          --n_guids="$N_GUIDS" \
+          --csv_path="$CSV_PATH" \
+          --use_compression="$USE_COMPRESSION" \
+          --compression_algo="$COMPRESSION_ALGO" \
+          --verbose="$VERBOSE" \
+          --pct_create="$PCT_CREATE" \
+          --pct_read="$PCT_READ" \
+          --pct_update="$PCT_UPDATE" \
+          --pct_delete="$PCT_DELETE" \
+          prepare
+        ;;
+      run)
+        sysbench "$SCRIPT" \
+          --db-driver=pgsql \
+          --pgsql-host="$DB_HOST" \
+          --pgsql-port="$DB_PORT" \
+          --pgsql-user="$DB_USER" \
+          --pgsql-password="$DB_PASS" \
+          --pgsql-db="$DB_NAME" \
+          --table_name="$TABLE_NAME" \
+          --prefix="$PREFIX" \
+          --threads="$THREADS" \
+          --time="$DURATION" \
+          --report-interval="$REPORT_INTERVAL" \
+          --batch_size="$BATCH_SIZE" \
+          --total_rows="$TOTAL_ROWS" \
+          --n_guids="$N_GUIDS" \
+          --csv_path="$CSV_PATH" \
+          --use_compression="$USE_COMPRESSION" \
+          --compression_algo="$COMPRESSION_ALGO" \
+          --verbose="$VERBOSE" \
+          --pct_create="$PCT_CREATE" \
+          --pct_read="$PCT_READ" \
+          --pct_update="$PCT_UPDATE" \
+          --pct_delete="$PCT_DELETE" \
+          $( [[ "$HISTOGRAM" == true ]] && echo "--histogram" ) \
+          run
+        ;;
+      cleanup)
+        sysbench "$SCRIPT" \
+          --db-driver=pgsql \
+          --pgsql-host="$DB_HOST" \
+          --pgsql-port="$DB_PORT" \
+          --pgsql-user="$DB_USER" \
+          --pgsql-password="$DB_PASS" \
+          --pgsql-db="$DB_NAME" \
+          --table_name="$TABLE_NAME" \
+          cleanup
+        ;;
+    esac
+    echo "=== ${phase^^} PHASE END (${RUN_ID}) ==="
+  } | tee -a "$LOG_FILE"
+}
+
+# ---------- EXECUTION ----------
+run_phase prepare
+run_phase run
+run_phase cleanup
+
+# ---------- VERIFY LOG ----------
+if [ ! -s "$LOG_FILE" ]; then
+  echo "⚠️  Log file not found or empty: $LOG_FILE"
+  echo "Aborting CSV generation."
+  exit 1
+fi
+
+# ---------- PARSE SYSBENCH OUTPUT ----------
+echo "📊 Parsing Sysbench results from: $LOG_FILE"
+
+read_q=$(grep -E "read:" "$LOG_FILE" | tail -1 | awk '{print $2}')
+write_q=$(grep -E "write:" "$LOG_FILE" | tail -1 | awk '{print $2}')
+other_q=$(grep -E "other:" "$LOG_FILE" | tail -1 | awk '{print $2}')
+total_q=$(grep -E "total:" "$LOG_FILE" | tail -1 | awk '{print $2}')
+
+transactions=$(grep -E "transactions:" "$LOG_FILE" | tail -1 | awk '{print $2}')
+tps=$(grep -E "transactions:" "$LOG_FILE" | tail -1 | awk -F'[()]' '{print $2}' | awk '{print $1}')
+qps=$(grep -E "queries:" "$LOG_FILE" | tail -1 | awk -F'[()]' '{print $2}' | awk '{print $1}')
+
+ignored_errs=$(grep -E "ignored errors:" "$LOG_FILE" | tail -1 | awk '{print $3}')
+reconnects=$(grep -E "reconnects:" "$LOG_FILE" | tail -1 | awk '{print $3+0}')
+
+total_time=$(grep -E "total time:" "$LOG_FILE" | tail -1 | awk '{print $3}' | tr -d 's')
+total_events=$(grep -E "total number of events:" "$LOG_FILE" | tail -1 | awk '{print $5}')
+
+lat_min=$(grep -E "min:" "$LOG_FILE" | tail -1 | awk '{print $2}')
+lat_avg=$(grep -E "avg:" "$LOG_FILE" | tail -1 | awk '{print $2}')
+lat_max=$(grep -E "max:" "$LOG_FILE" | tail -1 | awk '{print $2}')
+lat_p95=$(grep -E "95th percentile:" "$LOG_FILE" | tail -1 | awk '{print $3}')
+lat_sum=$(grep -E "sum:" "$LOG_FILE" | tail -1 | awk '{print $2}')
+
+# ---------- SANITIZE EMPTY VALUES ----------
+for var in read_q write_q other_q total_q transactions tps qps ignored_errs reconnects total_time total_events lat_min lat_avg lat_max lat_p95 lat_sum; do
+  eval "val=\${$var:-}"
+  if [ -z "$val" ]; then
+    echo "⚠️  Missing value for $var, setting to 0"
+    eval "$var=0"
+  fi
+done
+
+# ---------- WRITE TO CSV ----------
+echo "${RUN_ID},$(date -u +'%Y-%m-%dT%H:%M:%SZ'),${DB_HOST},${DB_PORT},${DB_NAME},${TABLE_NAME},${PREFIX},${THREADS},${BATCH_SIZE},${TABLE_SIZE},${TOTAL_ROWS},${N_GUIDS},${CSV_PATH},${DURATION},${REPORT_INTERVAL},${USE_COMPRESSION},${COMPRESSION_ALGO},${VERBOSE},${HISTOGRAM},${PCT_CREATE},${PCT_READ},${PCT_UPDATE},${PCT_DELETE},${read_q},${write_q},${other_q},${total_q},${transactions},${tps},${qps},${ignored_errs},${reconnects},${total_time},${total_events},${lat_min},${lat_avg},${lat_max},${lat_p95},${lat_sum}" \
+>> "$CSV_FILE"
+
+echo
+echo "✅ Benchmark complete."
+echo "   - Detailed log : $LOG_FILE"
+echo "   - Summary CSV  : $CSV_FILE"

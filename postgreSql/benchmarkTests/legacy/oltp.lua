@@ -30,6 +30,99 @@ end
 
 
 -- ==========================================================
+-- create_guid_pool_oltp(n)
+-- Generates a diverse set of enterprise-style identifiers:
+-- UUIDs, Customer IDs, Account Numbers, Order Codes, 
+-- Invoice Numbers, and Region/Dept prefixed identifiers.
+-- ==========================================================
+function create_guid_pool_oltp(n)
+  local pool = {}
+
+  -- --- Helper Generators ---
+
+  -- UUID (standard version 4)
+  local function gen_uuid()
+    local template = 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'
+    return string.gsub(template, '[xy]', function(c)
+      local v = (c == 'x') and math.random(0, 0xf) or math.random(8, 0xb)
+      return string.format('%x', v)
+    end)
+  end
+
+  -- Simple Customer ID: CUST-000001
+  local function gen_customer_id(i)
+    return string.format("CUST-%06d", i)
+  end
+
+  -- Account ID: ACC-XXXX (random alphanumeric)
+  local function gen_account_id()
+    return string.format("ACC-%04X", math.random(0, 0xFFFF))
+  end
+
+  -- Order Code: ORD-YYYYMMDD-XXXX
+  local function gen_order_code()
+    local date_str = os.date("!%Y%m%d")
+    return string.format("ORD-%s-%04d", date_str, math.random(0, 9999))
+  end
+
+  -- Invoice ID: INV-ABCD1234 (letters + digits)
+  local function gen_invoice_id()
+    local letters = ""
+    for _ = 1, 4 do
+      letters = letters .. string.char(math.random(65, 90)) -- A–Z
+    end
+    return string.format("INV-%s%04d", letters, math.random(0, 9999))
+  end
+
+  -- Region/Department Code: TX-SALES-00123
+  local function gen_region_tag()
+    local regions = {"TX", "CA", "NY", "IL", "FL", "WA", "GA"}
+    local depts = {"SALES", "OPS", "FIN", "HR", "ENG", "RND"}
+    return string.format("%s-%s-%05d",
+      regions[math.random(#regions)],
+      depts[math.random(#depts)],
+      math.random(0, 99999))
+  end
+
+  -- Vendor-style prefix key (enterprise products)
+  local function gen_vendor_tag()
+    local vendors = {"MICROSOFT", "AMZN", "GOOGLE", "IBM", "ORCL", "SAP"}
+    return string.format("%s-%04X", vendors[math.random(#vendors)], math.random(0, 0xFFFF))
+  end
+
+  -- --- Main Pool Generation Loop ---
+  for i = 1, n do
+    local id_type = sysbench.rand.uniform(1, 6)
+    local id
+
+    if id_type == 1 then
+      id = gen_customer_id(i)      -- sequential customer IDs
+    elseif id_type == 2 then
+      id = gen_account_id()        -- random account code
+    elseif id_type == 3 then
+      id = gen_order_code()        -- daily order ID
+    elseif id_type == 4 then
+      id = gen_invoice_id()        -- invoice-like key
+    elseif id_type == 5 then
+      id = gen_region_tag()        -- region/department composite
+    else
+      id = gen_vendor_tag()        -- vendor-tag style
+    end
+
+    -- Occasionally mix in UUIDs for diversity
+    if math.random() < 0.15 then
+      id = gen_uuid()
+    end
+
+    table.insert(pool, id)
+  end
+
+  print(string.format("✅ Generated %d enterprise-style GUIDs", #pool))
+  return pool
+end
+
+
+-- ==========================================================
 -- Generate realistic OLTP-style JSON payload (4KB–64KB)
 -- ==========================================================
 local function gen_json_payload()
@@ -81,16 +174,41 @@ function create_table(con)
 
   local create_sql = string.format([[
     CREATE TABLE IF NOT EXISTS %s (
-      time   TIMESTAMPTZ NOT NULL,
-      prefix TEXT NOT NULL,
-      guid   UUID NOT NULL,
-      data   JSONB,
-      PRIMARY KEY (time, prefix, guid)
-    );
+      time     TIMESTAMP(6) NOT NULL,
+      prefix   VARCHAR(4) NOT NULL,
+      guid     VARCHAR(64) NOT NULL,
+      data     JSONB,
+      PRIMARY KEY (prefix, guid)
+  );
   ]], table_name)
 
+  -- ✅ First, create the table
   assert(con:query(create_sql))
   print("Table created successfully.")
+
+  -- ✅ Optional: apply compression after creation
+  if sysbench.opt.use_compression then
+    print(string.format("Applying compression (%s) to table: %s",
+                        sysbench.opt.compression_algo, table_name))
+    local ok1, err1 = pcall(function()
+      con:query(string.format(
+        "ALTER TABLE %s ALTER COLUMN data SET STORAGE MAIN;", table_name))
+    end)
+    if not ok1 then
+      print("⚠️  Warning: could not set STORAGE MAIN: " .. tostring(err1))
+    end
+
+    local ok2, err2 = pcall(function()
+      con:query(string.format(
+        "ALTER TABLE %s ALTER COLUMN data SET COMPRESSION %s;",
+        table_name, sysbench.opt.compression_algo))
+    end)
+    if not ok2 then
+      print("⚠️  Warning: compression setting failed: " .. tostring(err2))
+    else
+      print(string.format("✅ Compression applied using %s", sysbench.opt.compression_algo))
+    end
+  end
 end
 
 -- ==========================================================

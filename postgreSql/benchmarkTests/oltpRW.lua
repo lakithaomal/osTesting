@@ -66,9 +66,13 @@ sysbench.cmdline.options = {
   total_rows         = {"Total rows per thread to insert during run", 10000},
   verbose            = {"Print every batch progress", false},
   n_guids            = {"Number of GUIDs to generate or load", 1000},
-  csv_path           = {"Path to save or load the GUID CSV file", "./guids/ts.csv"},
+  csv_path           = {"Path to save or load the GUID CSV file", "./guids/oltp.csv"},
   use_compression    = {"Enable compression (true/false)", false},
   compression_algo   = {"Compression algorithm (lz4, pglz, zstd)", "lz4"},
+  pct_create         = {"Percentage of CREATE operations", 40},
+  pct_read           = {"Percentage of READ operations", 30},
+  pct_update         = {"Percentage of UPDATE operations", 20},
+  pct_delete         = {"Percentage of DELETE operations", 10},
 }
 
 
@@ -113,76 +117,112 @@ end
 
 
 -- ==========================================================
--- Generate realistic multi-sensor JSON payload (100B–1KB)
--- One random sensor per record, with all its fields
+-- gen_json_payload()
+-- Enterprise OLTP payload generator (no datetime inside JSON)
+-- Payload size: ~4KB – 64KB
 -- ==========================================================
 local function gen_json_payload()
-  -- Target payload size variation
-  local target = sysbench.rand.uniform(300, 1200)
-  local pad_len = target - 150
+  -- Target payload size range
+  local target = sysbench.rand.uniform(4096, 65536)
+  local pad_len = target - 600  -- structured portion ~600 B
   if pad_len < 0 then pad_len = 0 end
   local pad = sysbench.rand.string(string.rep("x", pad_len))
 
-  -- Define available sensors and their readings
-  local sensors = {
+  -- Define realistic business entities
+  local entities = {
     {
-      id = "BME280",
+      type = "customer_profile",
       fields = {
-        {name = "temperature", unit = "C",   min = 20.0,  max = 35.0},
-        {name = "pressure",    unit = "hPa", min = 950.0, max = 1050.0},
-        {name = "humidity",    unit = "%",   min = 20.0,  max = 80.0}
+        {name = "first_name",  sample = {"Alice", "Bob", "Charlie", "Diana", "Ethan"}},
+        {name = "last_name",   sample = {"Smith", "Johnson", "Lee", "Patel", "Garcia"}},
+        {name = "email",       sample = {"alice@example.com", "bob@corp.com", "charlie@biz.io"}},
+        {name = "status",      sample = {"active", "suspended", "pending"}},
+        {name = "tier",        sample = {"standard", "gold", "platinum"}},
+        {name = "balance",     min = 0.0, max = 100000.0},
+        {name = "points",      min = 0, max = 20000},
+        {name = "region",      sample = {"US-TX", "US-CA", "US-NY", "CA-ON"}}
       }
     },
     {
-      id = "SCD41",
+      type = "order_record",
       fields = {
-        {name = "co2", unit = "ppm", min = 400.0, max = 2000.0}
+        {name = "order_id",    sample = {"ORD-20251022-0001", "ORD-20251022-0002", "ORD-20251022-0003"}},
+        {name = "order_date",  sample = {"2025-10-22", "2025-10-21", "2025-09-30"}},
+        {name = "items",       min = 1, max = 20},
+        {name = "amount",      min = 10.0, max = 5000.0},
+        {name = "currency",    sample = {"USD", "EUR", "JPY", "GBP"}},
+        {name = "payment",     sample = {"credit_card", "paypal", "wire"}},
+        {name = "status",      sample = {"processing", "shipped", "delivered", "cancelled"}},
+        {name = "warehouse",   sample = {"DAL", "NYC", "LON", "TOR"}}
       }
     },
     {
-      id = "SHT31",
+      type = "invoice",
       fields = {
-        {name = "temperature", unit = "C", min = 18.0, max = 32.0},
-        {name = "humidity",    unit = "%", min = 25.0, max = 85.0}
+        {name = "invoice_no",  sample = {"INV-001", "INV-002", "INV-003"}},
+        {name = "invoice_date", sample = {"2025-09-01", "2025-09-15", "2025-10-01"}},
+        {name = "due_date",     sample = {"2025-10-15", "2025-10-30"}},
+        {name = "amount_due",   min = 50.0, max = 20000.0},
+        {name = "tax_rate",     min = 0.05, max = 0.15},
+        {name = "currency",     sample = {"USD", "CAD", "EUR"}},
+        {name = "paid",         sample = {"true", "false"}},
+        {name = "client_name",  sample = {"ACME Corp", "Globex Ltd", "Wayne Enterprises"}}
       }
     },
     {
-      id = "TGS2611",
+      type = "employee_record",
       fields = {
-        {name = "ch4", unit = "ppm", min = 1.5, max = 3.5}
+        {name = "emp_id",       sample = {"E001", "E002", "E003", "E004"}},
+        {name = "department",   sample = {"HR", "ENG", "OPS", "FIN", "SALES"}},
+        {name = "salary",       min = 40000.0, max = 180000.0},
+        {name = "bonus",        min = 0.0, max = 25000.0},
+        {name = "performance",  sample = {"A", "B", "C"}},
+        {name = "manager",      sample = {"John Doe", "Mary Liu", "Peter Khan"}}
       }
     },
     {
-      id = "LPS22HB",
+      type = "shipment",
       fields = {
-        {name = "pressure", unit = "hPa", min = 950.0, max = 1050.0}
+        {name = "shipment_id",  sample = {"SHP-101", "SHP-102", "SHP-103"}},
+        {name = "carrier",      sample = {"UPS", "FedEx", "DHL", "USPS"}},
+        {name = "weight",       min = 0.5, max = 200.0},
+        {name = "priority",     sample = {"standard", "express", "overnight"}},
+        {name = "cost",         min = 5.0, max = 500.0},
+        {name = "delivered",    sample = {"true", "false"}},
+        {name = "destination",  sample = {"Dallas TX", "London UK", "Berlin DE", "Toronto CA"}}
       }
     }
   }
 
-  -- Randomly pick one sensor type
-  local sensor = sensors[sysbench.rand.default(1, #sensors)]
+  -- Choose random entity
+  local entity = entities[sysbench.rand.default(1, #entities)]
 
-  -- Generate readings for all fields of that sensor
-  local readings = {}
-  for _, f in ipairs(sensor.fields) do
-    local value = sysbench.rand.uniform(f.min, f.max)
-    table.insert(readings, string.format(
-      '{"field":"%s","value":%.3f,"unit":"%s"}',
-      f.name, value, f.unit
-    ))
+  -- Populate fields
+  local data_fields = {}
+  for _, f in ipairs(entity.fields) do
+    local value
+    if f.sample then
+      value = f.sample[sysbench.rand.default(1, #f.sample)]
+    elseif f.min and f.max then
+      local v = sysbench.rand.uniform(f.min, f.max)
+      value = (v % 1 == 0) and string.format("%d", v) or string.format("%.2f", v)
+    else
+      value = "N/A"
+    end
+    table.insert(data_fields, string.format('"%s":"%s"', f.name, value))
   end
 
-  -- Assemble JSON payload for this sensor
+  -- Assemble JSON payload (no timestamp)
   local json_str = string.format(
-    '{"sensor_id":"%s","readings":[%s],"variable_pad":"%s"}',
-    sensor.id,
-    table.concat(readings, ","),
+    '{"entity_type":"%s","data":{%s},"notes":"%s"}',
+    entity.type,
+    table.concat(data_fields, ","),
     pad
   )
 
   return json_str
 end
+
 
 -- ==========================================================
 -- Create the time-series table if not exists
@@ -197,7 +237,7 @@ function create_table(con)
       prefix   VARCHAR(4) NOT NULL,
       guid     VARCHAR(64) NOT NULL,
       data     JSONB,
-      PRIMARY KEY (prefix, guid, time)
+      PRIMARY KEY (guid, prefix)
   );
   ]], table_name)
 
@@ -231,18 +271,18 @@ function create_table(con)
 end
 
 
-
 -- ==========================================================
 -- create_guid_pool(n)
--- Generates a diverse set of IoT-style identifiers:
--- UUID, MAC (Wi-Fi/Ethernet), BLE address, LoRaWAN DevEUI,
--- Zigbee IEEE address, IMEI (cellular), Vendor-prefixed IDs.
+-- Generates a diverse set of enterprise-style identifiers:
+-- UUIDs, Customer IDs, Account Numbers, Order Codes, 
+-- Invoice Numbers, and Region/Dept prefixed identifiers.
 -- ==========================================================
 function create_guid_pool(n)
   local pool = {}
 
   -- --- Helper Generators ---
 
+  -- UUID (standard version 4)
   local function gen_uuid()
     local template = 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'
     return string.gsub(template, '[xy]', function(c)
@@ -251,86 +291,85 @@ function create_guid_pool(n)
     end)
   end
 
-  local function gen_mac()
-    local mac = {}
-    for _ = 1, 6 do
-      table.insert(mac, string.format("%02X", math.random(0, 255)))
-    end
-    return table.concat(mac, ":")
+  -- Simple Customer ID: CUST-000001
+  local function gen_customer_id(i)
+    return string.format("CUST-%06d", i)
   end
 
-  local function gen_ble_addr()
-    local ble = {}
-    for _ = 1, 6 do
-      table.insert(ble, string.format("%02X", math.random(0, 255)))
-    end
-    return table.concat(ble, "-")
+  -- Account ID: ACC-XXXX (random alphanumeric)
+  local function gen_account_id()
+    return string.format("ACC-%04X", math.random(0, 0xFFFF))
   end
 
-  local function gen_lorawan_eui()
-    local eui = {}
-    for _ = 1, 8 do
-      table.insert(eui, string.format("%02X", math.random(0, 255)))
-    end
-    return table.concat(eui)
+  -- Order Code: ORD-YYYYMMDD-XXXX
+  local function gen_order_code()
+    local date_str = os.date("!%Y%m%d")
+    return string.format("ORD-%s-%04d", date_str, math.random(0, 9999))
   end
 
-  local function gen_zigbee_ieee()
-    local ieee = {}
-    for _ = 1, 8 do
-      table.insert(ieee, string.format("%02X", math.random(0, 255)))
+  -- Invoice ID: INV-ABCD1234 (letters + digits)
+  local function gen_invoice_id()
+    local letters = ""
+    for _ = 1, 4 do
+      letters = letters .. string.char(math.random(65, 90)) -- A–Z
     end
-    return table.concat(ieee, ":")
+    return string.format("INV-%s%04d", letters, math.random(0, 9999))
   end
 
-  local function gen_imei()
-    local imei = {}
-    for _ = 1, 15 do
-      table.insert(imei, math.random(0, 9))
-    end
-    return table.concat(imei)
+  -- Region/Department Code: TX-SALES-00123
+  local function gen_region_tag()
+    local regions = {"TX", "CA", "NY", "IL", "FL", "WA", "GA"}
+    local depts = {"SALES", "OPS", "FIN", "HR", "ENG", "RND"}
+    return string.format("%s-%s-%05d",
+      regions[math.random(#regions)],
+      depts[math.random(#depts)],
+      math.random(0, 99999))
   end
 
-  local function gen_vendor_id()
-    local vendors = {
-      "RAK",        -- LoRaWAN gateways and modules
-      "NORDIC",     -- BLE/Thread chipsets
-      "SENSEAIR",   -- Gas sensors
-      "TEKTELIC",   -- Industrial IoT nodes
-      "KERLINK",    -- LoRa gateways
-      "ST",         -- STM32/LoRa chips
-      "OSPREY",     -- Generic custom hardware tag
-    }
+  -- Vendor-style prefix key (enterprise products)
+  local function gen_vendor_tag()
+    local vendors = {"MICROSOFT", "AMZN", "GOOGLE", "IBM", "ORCL", "SAP"}
     return string.format("%s-%04X", vendors[math.random(#vendors)], math.random(0, 0xFFFF))
   end
 
   -- --- Main Pool Generation Loop ---
   for i = 1, n do
-    local id_type = math.floor(sysbench.rand.uniform(1, 7))
+    local id_type = math.floor(sysbench.rand.uniform(1, 6))
+
     local id
 
     if id_type == 1 then
-      id = gen_uuid()                          -- UUID (app/cloud IDs)
+      id = gen_customer_id(i)      -- sequential customer IDs
     elseif id_type == 2 then
-      id = gen_mac()                           -- Wi-Fi / Ethernet MAC
+      id = gen_account_id()        -- random account code
     elseif id_type == 3 then
-      id = gen_ble_addr()                      -- BLE device address
+      id = gen_order_code()        -- daily order ID
     elseif id_type == 4 then
-      id = gen_lorawan_eui()                   -- LoRaWAN DevEUI
+      id = gen_invoice_id()        -- invoice-like key
     elseif id_type == 5 then
-      id = gen_zigbee_ieee()                   -- Zigbee IEEE 64-bit addr
-    elseif id_type == 6 then
-      id = gen_imei()                          -- Cellular IMEI
+      id = gen_region_tag()        -- region/department composite
     else
-      id = gen_vendor_id()                     -- Vendor-based device tag
+      id = gen_vendor_tag()        -- vendor-tag style
+    end
+
+    -- Occasionally mix in UUIDs for diversity
+    if math.random() < 0.15 then
+      id = gen_uuid()
     end
 
     table.insert(pool, id)
   end
 
-  print(string.format("✅ Generated %d mixed IoT-style IDs", #pool))
+  print(string.format("✅ Generated %d enterprise-style GUIDs", #pool))
   return pool
 end
+
+-- ==========================================================
+-- Prepare Phase — Bulk Insert
+-- This version uses a pre-generated GUID pool
+-- and cycles through it in random order
+-- ==========================================================
+
 
 -- Helper to shuffle GUID list in-place
 function shuffle(tbl)
@@ -339,10 +378,9 @@ function shuffle(tbl)
     tbl[i], tbl[j] = tbl[j], tbl[i]
   end
 end
+
 -- ==========================================================
 -- Prepare Phase — Bulk Insert
--- This version uses a pre-generated GUID pool
--- and cycles through it in random order
 -- ==========================================================
 function prepare()
   local csv_path     = sysbench.opt.csv_path or "guid_pool.csv"
@@ -412,74 +450,112 @@ end
 
 
 
+
 -- ==========================================================
--- Thread Initialization — Run Phase Setup (optimized)
+-- Thread Initialization — Run Phase Setup (OLTP Version)
 -- ==========================================================
 function thread_init()
-  math.randomseed(os.time() + sysbench.tid)
+  math.randomseed(os.time() + sysbench.tid) -- unique RNG seed per thread
   drv = sysbench.sql.driver()
   con = drv:connect()
 
   table_name = sysbench.opt.table_name
   prefix_val = sysbench.opt.prefix
+  batch_size = sysbench.opt.run_batch_size or sysbench.opt.batch_size or 1
   total_rows = sysbench.opt.total_rows
   verbose    = sysbench.opt.verbose
 
+  -- ✅ Load GUIDs for this thread
   guid_pool = {}
-
   for line in io.lines(sysbench.opt.csv_path) do
     table.insert(guid_pool, line)
   end
-  print(string.format("✅ Loaded %d GUIDs from %s", #guid_pool, sysbench.opt.csv_path))
- 
+
   current_index = 1
   shuffle(guid_pool)
 
 
+  -- ✅ Normalize CRUD operation ratios (once per thread)
+  pct_create = tonumber(sysbench.opt.pct_create) or 40
+  pct_read   = tonumber(sysbench.opt.pct_read)   or 30
+  pct_update = tonumber(sysbench.opt.pct_update) or 20
+  pct_delete = tonumber(sysbench.opt.pct_delete) or 10
+
+  local total_pct = pct_create + pct_read + pct_update + pct_delete
+  if total_pct ~= 100 then
+    print(string.format("[Thread %d] ⚠️ Adjusting CRUD mix (sum was %d, scaling to 100)", sysbench.tid, total_pct))
+    local scale = 100 / total_pct
+    pct_create = math.floor(pct_create * scale + 0.5)
+    pct_read   = math.floor(pct_read   * scale + 0.5)
+    pct_update = math.floor(pct_update * scale + 0.5)
+    pct_delete = 100 - (pct_create + pct_read + pct_update)
+  end
+
   print(string.format(
-    "[Thread %d] Initialized (%d GUIDs, shuffled once)",
-    sysbench.tid, #guid_pool))
+    "[Thread %d] Initialized (run_batch=%d, total_rows=%d, GUIDs=%d, CRUD mix: C=%d%% R=%d%% U=%d%% D=%d%%)",
+    sysbench.tid, batch_size, total_rows, #guid_pool,
+    pct_create, pct_read, pct_update, pct_delete
+  ))
 end
 
-
-
 -- ==========================================================
--- Run Phase — Continuous Write Benchmark (No Batching)
+-- Run Phase — OLTP Transaction Mix (C/R/U/D)
 -- ==========================================================
+
 function event()
 
-  -- Pick a GUID from the shuffled pool
-  -- In event()
+  
   local guid = guid_pool[current_index]
   current_index = current_index + 1
   if current_index > #guid_pool then
     current_index = 1
-    shuffle(guid_pool)  -- optional to randomize new cycle
+    shuffle(guid_pool)
   end
+
+
+  local op  = math.floor(sysbench.rand.uniform(1, 100))
   local now = get_timestamp_utc()
-  local json_str = gen_json_payload()
 
-  -- Single-row insert (no batching)
-  local sql = string.format(
-    "INSERT INTO %s (time, prefix, guid, data) VALUES ('%s','%s','%s','%s'::jsonb)",
-    table_name, now, prefix_val, guid, json_str)
+  if op <= pct_create then
+    -- UPSERT (insert or update the same key)
+    local json_str = gen_json_payload()
+    local sql = string.format([[
+      INSERT INTO %s (time, prefix, guid, data)
+      VALUES ('%s','%s','%s',$$%s$$::jsonb)
+      ON CONFLICT (prefix, guid)
+      DO UPDATE SET data = EXCLUDED.data, time = EXCLUDED.time;
+    ]], table_name, now, prefix_val, guid, json_str)
 
-  local ok, result = pcall(function()
-    return con:query(sql)
-  end)
+    local ok, err = pcall(function() con:query(sql) end)
+    if not ok then print("[UPSERT ❌]", err) elseif verbose then print("[UPSERT ✅]", guid) end
 
-  if not ok then
-    print(string.format("[Thread %d] ❌ Lua error: %s", sysbench.tid, tostring(result)))
-  elseif type(result) == "table" and result.err then
-    print(string.format("[Thread %d] ⚠️ PostgreSQL error: %s", sysbench.tid, result.err))
+  elseif op <= pct_create + pct_read then
+    -- READ
+    local sql = string.format(
+      "SELECT data FROM %s WHERE prefix='%s' AND guid='%s' LIMIT 1",
+      table_name, prefix_val, guid)
+    local ok, err = pcall(function() con:query(sql) end)
+    if not ok then print("[READ ❌]", err) elseif verbose then print("[READ ✅]", guid) end
+
+  elseif op <= pct_create + pct_read + pct_update then
+    -- UPDATE
+    local json_str = gen_json_payload()
+    local sql = string.format(
+      "UPDATE %s SET data=$$%s$$::jsonb, time='%s' WHERE prefix='%s' AND guid='%s'",
+      table_name, json_str, now, prefix_val, guid)
+    local ok, err = pcall(function() con:query(sql) end)
+    if not ok then print("[UPDATE ❌]", err) elseif verbose then print("[UPDATE ✅]", guid) end
+
   else
-    if verbose then
-      print(string.format("[Thread %d] ✅ Inserted row for GUID=%s", sysbench.tid, guid))
-    end
+    -- DELETE
+    local sql = string.format(
+      "DELETE FROM %s WHERE prefix='%s' AND guid='%s'",
+      table_name, prefix_val, guid)
+    local ok, err = pcall(function() con:query(sql) end)
+    if not ok then print("[DELETE ❌]", err) elseif verbose then print("[DELETE ✅]", guid) end
   end
+
 end
-
-
 
 function thread_done()
   con:disconnect()
