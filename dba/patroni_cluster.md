@@ -70,6 +70,8 @@ This exact configuration was successfully run on **macOS (Apple Silicon)** using
 ## ⚙️ 5. Build the Patroni Image
 
 ```bash
+git clone https://github.com/zalando/patroni.git
+cd patroni
 docker build -t patroni:local .
 ```
 This image bundles **PostgreSQL 17.6**, **Patroni 4.1.0**, and etcd client utilities.
