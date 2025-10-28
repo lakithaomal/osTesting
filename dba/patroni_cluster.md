@@ -33,7 +33,7 @@ This exact configuration was successfully run on **macOS (Apple Silicon)** using
                     │  /service/pg-cluster/...             │
                     └─────────┬─────────┬──────────────────┘
                               │         │
-       ┌──────────────────────┘         └───────────────────┌
+       ┌──────────────────────┘         └───────────────────┐
        │                                                    │
  ┌────────────┐                                        ┌────────────┐
  │ Patroni1   │                                        │ Patroni3   │
