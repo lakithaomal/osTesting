@@ -1,0 +1,20 @@
+Script started on Thu Oct 23 08:42:01 2025
+^D  848  ls -l
+  849  clear
+  850  ls
+  851  chmod +x runBenchMark.sh
+  852  ls
+  853  git add .
+  854  git commit -m "updates on ts writer v1"
+  855  git push
+  856  git add .
+  857  git commit -m "updates on ts writer v1"
+  858  git push
+  859  git add .
+  860  git commit -m "minor updates"
+  861  git push
+  862  docker commit 095596b2c18b ubuntu-sysbench\n
+  863  docker commit 095596b2c18b ubuntu-sysbench\n
+[1m[7m%[27m[1m[0m                                                                                [0m[27m[24m[Jlakitha@Lakithas-MacBook-Pro osTesting % [K[?2004h[?2004l
+
+Script done on Thu Oct 23 08:42:01 2025

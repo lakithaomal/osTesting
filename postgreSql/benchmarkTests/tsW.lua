@@ -53,6 +53,47 @@
 -- 8. Do I simulate some GUIDs to be more active than others?
 -- 9. Why is no time included in the primary key for the OLTP schema?
 -- 10 Do I need seperate GUID pools for oltp and tsdb tests?
+-- 11.   - what I don't know about PG is whether declaring PRIMARY KEY results in a queryable index 
+-- or if it just prevents duplicates; also, what kind of index should be used?
+  -- It is both. A primary key constraint automatically creates a unique index on the specified column(s).
+  -- The type of index created is a B-tree index by default, which is suitable for most use cases.
+  -- But for the time-series data, especially if you frequently query based on time ranges, we can
+  -- consider using BRIN indexes for better performance and storage efficiency.
+-- Why the primary key for tsdb includes time, but not for oltp?
+  -- Do I create unique guids for all.
+
+
+-- =========================================================
+-- CREATE TABLE ts_v01 (
+--     time     TIMESTAMP(6) NOT NULL,
+--     prefix   VARCHAR(4)   NOT NULL,
+--     guid     VARCHAR(64)  NOT NULL,
+--     data     JSONB,
+--     PRIMARY KEY (guid, time, prefix)
+-- );
+
+-- -- ✅ Optimize by time for range queries
+-- CREATE INDEX ts_v01_time_brin
+--     ON ts_v01 USING brin (time);
+
+-- -- ✅ Optional: JSON search acceleration
+-- CREATE INDEX ts_v01_data_gin
+--     ON ts_v01 USING gin (data jsonb_path_ops); 
+
+---- 
+
+-- TimescaleDB
+-- CREATE TABLE ts_v01 (
+--     time     TIMESTAMP(6) NOT NULL,
+--     prefix   VARCHAR(4)   NOT NULL,
+--     guid     VARCHAR(64)  NOT NULL,
+--     data     JSONB,
+--     PRIMARY KEY (guid, time, prefix)
+-- );
+
+-- -- Convert to hypertable (1-day chunks)
+-- SELECT create_hypertable('ts_v01', 'time', chunk_time_interval => interval '1 day');
+
 -- ==========================================================
 
 
