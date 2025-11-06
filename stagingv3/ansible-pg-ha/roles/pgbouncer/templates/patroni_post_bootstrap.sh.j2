@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Patroni exports PG* env vars; still, be explicit:
+export PGHOST=${PGHOST:-127.0.0.1}
+export PGPORT=${PGPORT:-{{ patroni_pg_port }}}
+export PGUSER=${PGUSER:-postgres}
+
+psql -v ON_ERROR_STOP=1 <<'SQL'
+-- Set postgres password (optional)
+ALTER USER postgres WITH PASSWORD '{{ patroni_superuser.password }}';
+
+-- Ensure replication user exists
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='{{ patroni_replication.name }}') THEN
+    CREATE ROLE {{ patroni_replication.name }} WITH REPLICATION LOGIN PASSWORD '{{ patroni_replication.password }}';
+  END IF;
+END $$;
+SQL

@@ -1,0 +1,15 @@
+[databases]
+# Forward all local connections to Patroni PostgreSQL
+postgres = host=127.0.0.1 port=5432 dbname=postgres user={{ pgbouncer_user }} password={{ pgbouncer_password }}
+
+[pgbouncer]
+listen_port = 6432
+listen_addr = 0.0.0.0
+auth_type = md5
+auth_file = /etc/pgbouncer/userlist.txt
+admin_users = {{ pgbouncer_admin_user }}
+pool_mode = transaction
+max_client_conn = 500
+default_pool_size = 50
+logfile = /var/log/pgbouncer/pgbouncer.log
+pidfile = /var/run/pgbouncer/pgbouncer.pid
