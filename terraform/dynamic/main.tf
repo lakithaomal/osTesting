@@ -9,7 +9,6 @@ resource "aws_instance" "ec2" {
   security_groups = [ aws_security_group.webtraffic.name]
 }
 
-
 variable "ingressrules" {
   type = list(number)  
   default = [80,443]

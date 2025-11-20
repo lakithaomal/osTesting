@@ -16,52 +16,11 @@ provider "aws" {
 resource "aws_instance" "ec2" {
   ami = "ami-00f46ccd1cbfb363e"
   instance_type = "t2.micro"
-  security_groups = [aws_security_group.webtraffic.name]
   tags = {
-    Name = "Web Server"
+    Name = "DB Server"
   }
-  user_data = <<-EOF
-    #!/bin/bash
-    apt-get update -y
-    apt-get install -y apache2
-    systemctl start apache2
-    systemctl enable apache2
-    echo "<h1>Hello from Terraform (Ubuntu)</h1>" > /var/www/html/index.html
-  EOF
-  # user_data = file("server-script.sh") # Alternative way to provide user data from a file
 
 }
-
-
-
-resource "aws_security_group" "webtraffic" {
-  name        = "allow_web_traffic"
-  description = "Allow inbound HTTP and HTTPS traffic"
-  
-  dynamic "ingress" {
-    iterator = port
-    for_each = var.ingressrules
-    content {
-      from_port   = port.value
-      to_port     = port.value
-      protocol    = "TCP"
-      cidr_blocks = ["0.0.0.0/0"]   
-    }
-  }
-  dynamic "egress" {
-    iterator = port
-    for_each = var.egressrules
-    content {
-      from_port   = port.value
-      to_port     = port.value
-      protocol    = "TCP"
-    cidr_blocks = ["0.0.0.0/0"]   
-  }
-}
-}
-  
-
-
 
 # Elastic IP Resource
 # This resource allocates an Elastic IP and associates it with the EC2 instance.
