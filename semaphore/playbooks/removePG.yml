@@ -1,0 +1,73 @@
+---
+- name: Completely remove PostgreSQL from Ubuntu
+  hosts: pgnode
+  become: yes
+
+  tasks:
+
+    - name: Stop PostgreSQL service if running
+      service:
+        name: postgresql
+        state: stopped
+      ignore_errors: yes
+
+    - name: Disable PostgreSQL service
+      systemd:
+        name: postgresql
+        enabled: no
+      ignore_errors: yes
+
+    - name: Remove all PostgreSQL packages
+      apt:
+        name: "postgresql*"
+        state: absent
+        purge: yes
+
+    - name: Remove PostgreSQL contrib packages
+      apt:
+        name: "postgresql-contrib*"
+        state: absent
+        purge: yes
+
+    - name: Remove any remaining PGDG packages
+      shell: apt-get remove -y 'postgresql*'
+      ignore_errors: yes
+
+    - name: Remove PostgreSQL data directory
+      file:
+        path: /var/lib/postgresql
+        state: absent
+
+    - name: Remove PostgreSQL configuration directory
+      file:
+        path: /etc/postgresql
+        state: absent
+
+    - name: Remove PostgreSQL log directory
+      file:
+        path: /var/log/postgresql
+        state: absent
+
+    - name: Remove PostgreSQL runtime directory
+      file:
+        path: /var/run/postgresql
+        state: absent
+      ignore_errors: yes
+
+    - name: Remove postgres user (optional)
+      user:
+        name: postgres
+        state: absent
+        remove: yes
+      ignore_errors: yes
+
+    - name: Remove postgres group (optional)
+      group:
+        name: postgres
+        state: absent
+      ignore_errors: yes
+
+    - name: Autoremove leftover dependencies
+      apt:
+        autoremove: yes
+        purge: yes
