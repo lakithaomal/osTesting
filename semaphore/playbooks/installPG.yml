@@ -1,0 +1,61 @@
+
+---
+- name: Install and configure PostgreSQL on Ubuntu
+  hosts: pgnode
+  become: yes
+
+  vars:
+    postgres_db: testdb
+    postgres_user: testuser
+    postgres_password: "Password123"   # change as needed
+
+  tasks:
+    - name: Update apt cache
+      apt:
+        update_cache: yes
+
+    - name: Install PostgreSQL server
+      apt:
+        name: postgresql
+        state: present
+
+    - name: Ensure PostgreSQL is running and enabled
+      service:
+        name: postgresql
+        state: started
+        enabled: yes
+
+    # Creates database user
+    - name: Ensure PostgreSQL user exists
+      become_user: postgres
+      postgresql_user:
+        name: "{{ postgres_user }}"
+        password: "{{ postgres_password }}"
+        encrypted: no
+
+    # Creates database
+    - name: Ensure PostgreSQL database exists
+      become_user: postgres
+      postgresql_db:
+        name: "{{ postgres_db }}"
+        owner: "{{ postgres_user }}"
+
+    - name: Allow password authentication in pg_hba.conf
+      lineinfile:
+        path: /etc/postgresql/*/main/pg_hba.conf
+        regexp: '^local\s+all\s+postgres\s+peer'
+        line: 'local   all             postgres                                md5'
+      notify: Restart PostgreSQL
+
+    - name: Allow all users password authentication
+      lineinfile:
+        path: /etc/postgresql/*/main/pg_hba.conf
+        insertafter: '^# "local" is for Unix domain socket connections only'
+        line: 'local   all             all                                     md5'
+      notify: Restart PostgreSQL
+
+  handlers:
+    - name: Restart PostgreSQL
+      service:
+        name: postgresql
+        state: restarted
