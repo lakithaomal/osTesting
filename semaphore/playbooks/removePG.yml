@@ -1,73 +1,70 @@
 ---
-- name: Completely remove PostgreSQL from Ubuntu
+- name: Install PostgreSQL 18 from PGDG Repository
   hosts: pgnode
   become: yes
+  become_method: sudo
+
+  vars:
+    pg_version: 18
+    postgres_db: testdb
+    postgres_user: testuser
+    postgres_password: "Password123"
 
   tasks:
+    - name: Install prerequisites
+      apt:
+        name:
+          - wget
+          - ca-certificates
+          - gnupg
+          - lsb-release
+        state: present
+        update_cache: yes
 
-    - name: Stop PostgreSQL service if running
+    - name: Add PGDG apt repo signing key (new method)
+      shell: |
+        wget -qO /usr/share/keyrings/postgresql.asc https://www.postgresql.org/media/keys/ACCC4CF8.asc
+      args:
+        creates: /usr/share/keyrings/postgresql.asc
+
+    - name: Add PGDG repository for PostgreSQL 18
+      copy:
+        dest: /etc/apt/sources.list.d/pgdg.list
+        content: |
+          deb [signed-by=/usr/share/keyrings/postgresql.asc] http://apt.postgresql.org/pub/repos/apt {{ ansible_distribution_release }}-pgdg main
+
+    - name: Update apt cache with new repo
+      apt:
+        update_cache: yes
+
+    - name: Install PostgreSQL 18 packages
+      apt:
+        name:
+          - "postgresql-{{ pg_version }}"
+          - "postgresql-client-{{ pg_version }}"
+          - "postgresql-contrib-{{ pg_version }}"
+        state: present
+
+    - name: Ensure PostgreSQL service is started and enabled
       service:
         name: postgresql
-        state: stopped
-      ignore_errors: yes
+        state: started
+        enabled: yes
 
-    - name: Disable PostgreSQL service
-      systemd:
-        name: postgresql
-        enabled: no
-      ignore_errors: yes
+    # --- FIXED user/database creation (module broken upstream) ---
+    - name: Create PostgreSQL user if not exists
+      shell: |
+        sudo -u postgres psql -tc "SELECT 1 FROM pg_roles WHERE rolname='{{ postgres_user }}'" | grep -q 1 \
+        || sudo -u postgres psql -c "CREATE USER {{ postgres_user }} WITH PASSWORD '{{ postgres_password }}';"
 
-    - name: Remove all PostgreSQL packages
-      apt:
-        name: "postgresql*"
-        state: absent
-        purge: yes
+    - name: Create PostgreSQL database if not exists
+      shell: |
+        sudo -u postgres psql -tc "SELECT 1 FROM pg_database WHERE datname='{{ postgres_db }}'" | grep -q 1 \
+        || sudo -u postgres psql -c "CREATE DATABASE {{ postgres_db }} OWNER {{ postgres_user }};"
 
-    - name: Remove PostgreSQL contrib packages
-      apt:
-        name: "postgresql-contrib*"
-        state: absent
-        purge: yes
+    - name: Display installed PostgreSQL version
+      command: psql --version
+      register: pg_ver
 
-    - name: Remove any remaining PGDG packages
-      shell: apt-get remove -y 'postgresql*'
-      ignore_errors: yes
-
-    - name: Remove PostgreSQL data directory
-      file:
-        path: /var/lib/postgresql
-        state: absent
-
-    - name: Remove PostgreSQL configuration directory
-      file:
-        path: /etc/postgresql
-        state: absent
-
-    - name: Remove PostgreSQL log directory
-      file:
-        path: /var/log/postgresql
-        state: absent
-
-    - name: Remove PostgreSQL runtime directory
-      file:
-        path: /var/run/postgresql
-        state: absent
-      ignore_errors: yes
-
-    - name: Remove postgres user (optional)
-      user:
-        name: postgres
-        state: absent
-        remove: yes
-      ignore_errors: yes
-
-    - name: Remove postgres group (optional)
-      group:
-        name: postgres
-        state: absent
-      ignore_errors: yes
-
-    - name: Autoremove leftover dependencies
-      apt:
-        autoremove: yes
-        purge: yes
+    - debug:
+        var: pg_ver.stdout
