@@ -25,13 +25,22 @@
         state: started
         enabled: yes
 
-    # Creates database user
     - name: Ensure PostgreSQL user exists
+      become: yes
       become_user: postgres
+      become_method: sudo
       postgresql_user:
         name: "{{ postgres_user }}"
         password: "{{ postgres_password }}"
         encrypted: no
+
+    - name: Ensure PostgreSQL database exists
+      become: yes
+      become_user: postgres
+      become_method: sudo
+      postgresql_db:
+        name: "{{ postgres_db }}"
+        owner: "{{ postgres_user }}"        
 
     # Creates database
     - name: Ensure PostgreSQL database exists
