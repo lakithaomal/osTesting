@@ -5,6 +5,8 @@
 *.csv
 *.log
 
+!semaphore/playbooks/*.yml
+
 .DS_Store
 
 .terraform/

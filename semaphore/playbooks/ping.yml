@@ -1,0 +1,7 @@
+---
+- name: Test Ansible connection
+  hosts: pgnode
+  gather_facts: no
+  tasks:
+    - name: Ping the server
+      ping:
